@@ -13,7 +13,7 @@
  *     "mcpServers": {
  *       "megasearch": {
  *         "command": "npx",
- *         "args": ["megasearch-mcp-proxy-stdio"],
+ *         "args": ["megasearch-mcp"],
  *         "env": {
  *           "MEGASEARCH_CLIENT_ID": "mcp_xxx",
  *           "MEGASEARCH_CLIENT_SECRET": "your_secret",
@@ -30,6 +30,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
   Tool,
+  ProgressNotificationSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 
 // Configuration from environment
@@ -99,15 +100,41 @@ async function getAccessToken(): Promise<string> {
 }
 
 /**
- * Execute search via MegaSearch REST API
+ * Execute search via MegaSearch REST API with progress notifications
  */
-async function executeSearch(query: string): Promise<SearchResponse> {
+async function executeSearch(
+  query: string,
+  progressToken: string | number | undefined,
+  sendProgress: (progress: number, total: number, message: string) => Promise<void>
+): Promise<SearchResponse> {
   const accessToken = await getAccessToken();
+
+  // Send initial progress
+  await sendProgress(0, 100, "Starting search...");
 
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), config.timeout);
 
+  // Start a progress ticker to keep the connection alive
+  // Send progress updates every 10 seconds
+  let progressValue = 5;
+  const progressInterval = setInterval(async () => {
+    progressValue = Math.min(progressValue + 5, 90);
+    const messages = [
+      "Querying search engines...",
+      "Analyzing results...",
+      "Extracting content...",
+      "Synthesizing answer...",
+      "Processing sources...",
+      "Finalizing response...",
+    ];
+    const msgIndex = Math.floor((progressValue / 100) * messages.length);
+    await sendProgress(progressValue, 100, messages[Math.min(msgIndex, messages.length - 1)]);
+  }, 10000);
+
   try {
+    await sendProgress(10, 100, "Sending query to MegaSearch...");
+
     const response = await fetch(`${config.baseUrl}/api/v1/search`, {
       method: "POST",
       headers: {
@@ -119,6 +146,7 @@ async function executeSearch(query: string): Promise<SearchResponse> {
     });
 
     clearTimeout(timeoutId);
+    clearInterval(progressInterval);
 
     if (!response.ok) {
       const errorData = await response.json().catch(() => ({}));
@@ -128,7 +156,6 @@ async function executeSearch(query: string): Promise<SearchResponse> {
         response.statusText;
 
       if (response.status === 401) {
-        // Token might be invalid, clear cache and retry once
         tokenCache = null;
         throw new Error("Authentication failed. Please check your credentials.");
       } else if (response.status === 402) {
@@ -144,9 +171,14 @@ async function executeSearch(query: string): Promise<SearchResponse> {
       throw new Error(`Search failed: ${response.status} - ${detail}`);
     }
 
-    return (await response.json()) as SearchResponse;
+    await sendProgress(95, 100, "Formatting results...");
+    const result = (await response.json()) as SearchResponse;
+    await sendProgress(100, 100, "Search complete!");
+
+    return result;
   } catch (error) {
     clearTimeout(timeoutId);
+    clearInterval(progressInterval);
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error(
         `Search timed out after ${config.timeout / 1000} seconds`
@@ -263,7 +295,8 @@ const SEARCH_TOOL: Tool = {
     "Search the web for any information using MegaSearch. " +
     "Fires multiple search engines in parallel, extracts content, " +
     "analyzes results, and synthesizes a comprehensive answer with citations. " +
-    "Just provide your question - the system handles everything else.",
+    "Just provide your question - the system handles everything else. " +
+    "Note: Comprehensive searches may take 30-60 seconds.",
   inputSchema: {
     type: "object" as const,
     properties: {
@@ -298,7 +331,8 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
 
 // Handle tool calls
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
+  const { name, arguments: args, _meta } = request.params;
+  const progressToken = _meta?.progressToken;
 
   if (name !== "search") {
     return {
@@ -325,8 +359,28 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     };
   }
 
+  // Create progress sender function
+  const sendProgress = async (progress: number, total: number, message: string) => {
+    if (progressToken !== undefined) {
+      try {
+        await server.notification({
+          method: "notifications/progress",
+          params: {
+            progressToken,
+            progress,
+            total,
+            message,
+          },
+        });
+      } catch (e) {
+        // Ignore notification errors - client may not support progress
+        console.error("Progress notification failed:", e);
+      }
+    }
+  };
+
   try {
-    const result = await executeSearch(query.trim());
+    const result = await executeSearch(query.trim(), progressToken, sendProgress);
     const formatted = formatSearchResponse(result);
 
     return {
