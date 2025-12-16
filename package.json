@@ -1,13 +1,20 @@
 {
-  "name": "megasearch-mcp-proxy-stdio",
+  "name": "megasearch-mcp",
   "version": "1.0.0",
-  "description": "MCP stdio proxy for MegaSearch - connects Claude Desktop to MegaSearch API",
+  "description": "MCP stdio proxy for MegaSearch - connects Claude Desktop to MegaSearch API using OAuth 2.0",
   "main": "dist/index.js",
+  "type": "module",
   "bin": {
     "megasearch-mcp": "dist/index.js"
   },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts"
   },
@@ -16,10 +23,24 @@
     "megasearch",
     "claude",
     "ai",
-    "search"
+    "search",
+    "model-context-protocol",
+    "anthropic",
+    "llm"
   ],
-  "author": "ProDevs",
+  "author": {
+    "name": "ProDevs",
+    "url": "https://prodevs.in"
+  },
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ProDevs-Kol/megasearch-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ProDevs-Kol/megasearch-mcp/issues"
+  },
+  "homepage": "https://github.com/ProDevs-Kol/megasearch-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"
   },
