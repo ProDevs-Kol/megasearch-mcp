@@ -39,6 +39,8 @@ const config = {
   clientId: process.env.MEGASEARCH_CLIENT_ID || "",
   clientSecret: process.env.MEGASEARCH_CLIENT_SECRET || "",
   timeout: parseInt(process.env.MEGASEARCH_TIMEOUT || "300000", 10), // 5 minutes default
+  umamiUrl: process.env.UMAMI_URL || "",
+  umamiWebsiteId: process.env.UMAMI_WEBSITE_ID || "",
 };
 
 // Token cache
@@ -100,6 +102,35 @@ async function getAccessToken(): Promise<string> {
 }
 
 /**
+ * Track event to Umami (non-blocking, fire-and-forget)
+ */
+async function trackEvent(
+  eventName: string,
+  eventData: Record<string, any>,
+  userId?: string
+): Promise<void> {
+  if (!config.umamiUrl || !config.umamiWebsiteId) return;
+  
+  // Fire-and-forget: don't await
+  fetch(`${config.umamiUrl}/api/collect`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      website: config.umamiWebsiteId,
+      name: eventName,
+      url: '/mcp/stdio/search',
+      data: {
+        ...eventData,
+        ...(userId ? { user_id: userId } : {}),
+        client_id: config.clientId.substring(0, 20), // Truncate for privacy
+      }
+    })
+  }).catch(() => {
+    // Silently fail - never break the app
+  });
+}
+
+/**
  * Execute search via MegaSearch REST API with progress notifications
  */
 async function executeSearch(
@@ -107,7 +138,27 @@ async function executeSearch(
   progressToken: string | number | undefined,
   sendProgress: (progress: number, total: number, message: string) => Promise<void>
 ): Promise<SearchResponse> {
+  const startTime = Date.now();
   const accessToken = await getAccessToken();
+  
+  // Try to extract user ID from token (optional - may not be available)
+  let userId: string | undefined;
+  try {
+    // Validate token with backend to get user_id
+    const validateResponse = await fetch(`${config.baseUrl}/api/v1/oauth/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ access_token: accessToken })
+    });
+    if (validateResponse.ok) {
+      const validateData = await validateResponse.json() as { valid?: boolean; user_id?: string };
+      if (validateData.valid && validateData.user_id) {
+        userId = validateData.user_id;
+      }
+    }
+  } catch (e) {
+    // Silently fail - tracking is optional
+  }
 
   // Send initial progress
   await sendProgress(0, 100, "Starting search...");
@@ -175,10 +226,29 @@ async function executeSearch(
     const result = (await response.json()) as SearchResponse;
     await sendProgress(100, 100, "Search complete!");
 
+    // Track successful search (non-blocking)
+    const duration = Date.now() - startTime;
+    trackEvent('mcp_stdio_search_success', {
+      query_length: query.length,
+      duration_ms: duration,
+      sources_count: result.sources?.length || 0,
+      iterations: result.metadata?.iterations || 1,
+      providers_count: result.metadata?.providers_used?.length || 0,
+    }, userId);
+
     return result;
   } catch (error) {
     clearTimeout(timeoutId);
     clearInterval(progressInterval);
+    
+    // Track search error (non-blocking)
+    const duration = Date.now() - startTime;
+    trackEvent('mcp_stdio_search_error', {
+      error: error instanceof Error ? error.message : String(error),
+      query_length: query.length,
+      duration_ms: duration,
+    }, userId);
+    
     if (error instanceof Error && error.name === "AbortError") {
       throw new Error(
         `Search timed out after ${config.timeout / 1000} seconds`
